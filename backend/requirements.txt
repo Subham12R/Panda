@@ -1,0 +1,14 @@
+fastapi
+uvicorn[standard]
+python-dotenv
+anthropic
+openai
+httpx
+beautifulsoup4
+fastembed
+numpy
+pypdf
+python-docx
+python-multipart
+keyring
+mcp

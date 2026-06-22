@@ -1,0 +1,14 @@
+node_modules/
+dist/
+build/
+.venv/
+__pycache__/
+*.pyc
+.env
+.DS_Store
+backend/pandas.db
+
+
+# macOS
+.DS_Store
+._*
