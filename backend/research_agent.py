@@ -11,19 +11,18 @@ from fastapi import WebSocket
 
 logger = logging.getLogger("pandas.research")
 
-_plan_gates: dict[str, asyncio.Event] = {}
-_plan_declined: set[str] = set()
+_accepted_plans: set[str] = set()
 
 
-def approve_plan(request_id: str) -> None:
-    if request_id in _plan_gates:
-        _plan_gates[request_id].set()
+def approve_plan(session_id: str) -> None:
+    _accepted_plans.add(session_id)
+    logger.info(f"Plan accepted for session {session_id}")
 
 
-def decline_plan(request_id: str) -> None:
-    _plan_declined.add(request_id)
-    if request_id in _plan_gates:
-        _plan_gates[request_id].set()
+def decline_plan(session_id: str) -> None:
+    _accepted_plans.discard(session_id)
+    logger.info(f"Plan declined for session {session_id}")
+
 
 SERPER_URL = "https://google.serper.dev/search"
 FETCH_TIMEOUT = 8
@@ -118,7 +117,7 @@ async def _fetch_url(url: str) -> str:
         return ""
 
 
-async def run_research_agent(websocket: WebSocket, session_id: str, request_id: str, query: str, provider):
+async def run_research_agent(websocket: WebSocket, session_id: str, request_id: str, query: str, provider, mode: str = "research"):
     from database import save_message, save_chunk
     from embedder import embed
 
@@ -126,27 +125,6 @@ async def run_research_agent(websocket: WebSocket, session_id: str, request_id: 
     await _emit(websocket, session_id, request_id, "plan", "running")
     sub_queries = await _plan_queries(provider, query)
     await _emit(websocket, session_id, request_id, "plan", "completed", {"queries": sub_queries})
-
-    # Wait for user to accept/decline the plan
-    gate = asyncio.Event()
-    _plan_gates[request_id] = gate
-    await websocket.send_json({
-        "type": "plan_review",
-        "queries": sub_queries,
-        "session_id": session_id,
-        "request_id": request_id,
-    })
-    try:
-        await asyncio.wait_for(gate.wait(), timeout=300)
-    except asyncio.TimeoutError:
-        _plan_declined.add(request_id)
-    finally:
-        _plan_gates.pop(request_id, None)
-
-    if request_id in _plan_declined:
-        _plan_declined.discard(request_id)
-        await websocket.send_json({"type": "stopped", "session_id": session_id, "request_id": request_id})
-        return
 
     # Stage 2: Search
     await _emit(websocket, session_id, request_id, "search", "running")
@@ -193,7 +171,6 @@ async def run_research_agent(websocket: WebSocket, session_id: str, request_id: 
     if has_web_results:
         context_parts = []
         references = []
-        # Prefer fully fetched docs; fall back to search snippets
         docs_to_use = fetched_docs if fetched_docs else [
             {"title": r["title"], "url": r["url"], "content": r.get("snippet", ""), "snippet": r.get("snippet", "")}
             for r in all_results[:8]
@@ -205,38 +182,67 @@ async def run_research_agent(websocket: WebSocket, session_id: str, request_id: 
         context_block = "\n\n".join(context_parts)
         refs_block = "\n".join(references)
 
+        if mode == "plan":
+            system_content = (
+                "You are a strategic planning expert. Based on the research, produce a detailed, actionable project plan.\n\n"
+                "Structure the plan with these sections:\n"
+                "## Overview\n"
+                "## Objectives\n"
+                "## Action Plan\n"
+                "## Resources Required\n"
+                "## Risks and Mitigations\n"
+                "## Success Metrics\n\n"
+                "Be specific and actionable. Cite sources using [1], [2], etc. "
+                "Do not use emojis or em dashes. Use plain markdown with ## for section headers."
+            )
+            user_content = (
+                f"Goal: {query}\n\n"
+                f"Research sources:\n{context_block}\n\n"
+                f"Write a comprehensive, actionable project plan."
+            )
+        else:
+            system_content = (
+                "You are a research synthesizer. Write a clear, structured report answering the user's question. "
+                "You are a senior research analyst.\n\n"
+                "Requirements:\n"
+                "1. Executive Summary\n"
+                "2. Key Findings\n"
+                "3. Detailed Analysis\n"
+                "4. Contradictory Evidence\n"
+                "5. Conclusions\n"
+                "6. References\n"
+                "Cite every factual claim using [1], [2], etc.\n"
+                "Distinguish facts from interpretation.\n"
+                "End with a numbered References section. "
+                "Do not use emojis. Do not use em dashes. Use plain markdown with ## for section headers."
+            )
+            user_content = (
+                f"Research question: {query}\n\n"
+                f"Sources:\n{context_block}\n\n"
+                f"Write a comprehensive, well-structured answer with citations."
+            )
+
         synthesis_prompt = [
-            {
-                "role": "system",
-                "content": (
-                    "You are a research synthesizer. Write a clear, structured report answering the user's question. "
-                    "You are a senior research analyst.\n\n"
-                    "Requirements:\n"
-                    "1. Executive Summary\n"
-                    "2. Key Findings\n"
-                    "3. Detailed Analysis\n"
-                    "4. Contradictory Evidence\n"
-                    "5. Conclusions\n"
-                    "6. References\n"
-                    "Cite every factual claim using [1], [2], etc.\n"
-                    "Distinguish facts from interpretation.\n"
-                    "End with a numbered References section. "
-                    "Do not use emojis. Do not use em dashes. Use plain markdown with ## for section headers."
-                ),
-            },
-            {
-                "role": "user",
-                "content": (
-                    f"Research question: {query}\n\n"
-                    f"Sources:\n{context_block}\n\n"
-                    f"Write a comprehensive, well-structured answer with citations."
-                ),
-            },
+            {"role": "system", "content": system_content},
+            {"role": "user", "content": user_content},
         ]
     else:
-        # No web results — answer from training knowledge, no fake citations
         refs_block = ""
-        synthesis_prompt = [
+        if mode == "plan":
+            synthesis_prompt = [
+                {
+                    "role": "system",
+                    "content": (
+                        "You are a strategic planning expert. Create a detailed, actionable project plan "
+                        "using your knowledge. Structure it with ## Overview, ## Objectives, ## Action Plan, "
+                        "## Resources Required, ## Risks and Mitigations, ## Success Metrics. "
+                        "Do not use emojis or em dashes."
+                    ),
+                },
+                {"role": "user", "content": f"Goal: {query}\n\nWrite a comprehensive, actionable project plan."},
+            ]
+        else:
+            synthesis_prompt = [
             {
                 "role": "system",
                 "content": (

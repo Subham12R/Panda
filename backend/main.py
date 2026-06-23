@@ -668,7 +668,7 @@ async def run_generation(websocket: WebSocket, payload: dict):
 
     if mode in ("plan", "research"):
         try:
-            await run_research_agent(websocket, session_id, request_id, clean_text, provider)
+            await run_research_agent(websocket, session_id, request_id, clean_text, provider, mode=mode)
         except asyncio.CancelledError:
             await websocket.send_json({"type": "stopped", "session_id": session_id, "request_id": request_id})
             raise
@@ -821,6 +821,17 @@ async def chat_ws(websocket: WebSocket):
                 payload = {"text": raw}
 
             message_type = payload.get("type", "chat")
+
+            if message_type == "plan_approve":
+                from research_agent import approve_plan
+                approve_plan(payload.get("session_id", ""))
+                continue
+
+            if message_type == "plan_decline":
+                from research_agent import decline_plan
+                decline_plan(payload.get("session_id", ""))
+                continue
+
             if message_type == "stop":
                 request_id = payload.get("request_id")
                 task = tasks.get(request_id)
@@ -828,15 +839,6 @@ async def chat_ws(websocket: WebSocket):
                     task.cancel()
                 continue
 
-            if message_type == "plan_approve":
-                from research_agent import approve_plan
-                approve_plan(payload.get("request_id", ""))
-                continue
-
-            if message_type == "plan_decline":
-                from research_agent import decline_plan
-                decline_plan(payload.get("request_id", ""))
-                continue
 
             request_id = payload.get("request_id") or str(uuid.uuid4())
             payload["request_id"] = request_id
