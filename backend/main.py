@@ -828,6 +828,16 @@ async def chat_ws(websocket: WebSocket):
                     task.cancel()
                 continue
 
+            if message_type == "plan_approve":
+                from research_agent import approve_plan
+                approve_plan(payload.get("request_id", ""))
+                continue
+
+            if message_type == "plan_decline":
+                from research_agent import decline_plan
+                decline_plan(payload.get("request_id", ""))
+                continue
+
             request_id = payload.get("request_id") or str(uuid.uuid4())
             payload["request_id"] = request_id
             task = asyncio.create_task(run_generation(websocket, payload))

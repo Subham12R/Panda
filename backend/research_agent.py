@@ -11,6 +11,20 @@ from fastapi import WebSocket
 
 logger = logging.getLogger("pandas.research")
 
+_plan_gates: dict[str, asyncio.Event] = {}
+_plan_declined: set[str] = set()
+
+
+def approve_plan(request_id: str) -> None:
+    if request_id in _plan_gates:
+        _plan_gates[request_id].set()
+
+
+def decline_plan(request_id: str) -> None:
+    _plan_declined.add(request_id)
+    if request_id in _plan_gates:
+        _plan_gates[request_id].set()
+
 SERPER_URL = "https://google.serper.dev/search"
 FETCH_TIMEOUT = 8
 MAX_FETCH_PER_QUERY = 5
@@ -112,6 +126,27 @@ async def run_research_agent(websocket: WebSocket, session_id: str, request_id: 
     await _emit(websocket, session_id, request_id, "plan", "running")
     sub_queries = await _plan_queries(provider, query)
     await _emit(websocket, session_id, request_id, "plan", "completed", {"queries": sub_queries})
+
+    # Wait for user to accept/decline the plan
+    gate = asyncio.Event()
+    _plan_gates[request_id] = gate
+    await websocket.send_json({
+        "type": "plan_review",
+        "queries": sub_queries,
+        "session_id": session_id,
+        "request_id": request_id,
+    })
+    try:
+        await asyncio.wait_for(gate.wait(), timeout=300)
+    except asyncio.TimeoutError:
+        _plan_declined.add(request_id)
+    finally:
+        _plan_gates.pop(request_id, None)
+
+    if request_id in _plan_declined:
+        _plan_declined.discard(request_id)
+        await websocket.send_json({"type": "stopped", "session_id": session_id, "request_id": request_id})
+        return
 
     # Stage 2: Search
     await _emit(websocket, session_id, request_id, "search", "running")
